@@ -25,6 +25,11 @@ DEFAULT_TTL = 30.0         # seconds; bounds staleness even if invalidation miss
 DEFAULT_CAPACITY = 2048    # max entries per node; LRU-evict beyond this
 MAX_PREFIX_LEN = 50        # cap invalidation fan-out for pathologically long queries
 
+# Recency-aware ("trending") path: cached under a separate key namespace with a
+# short TTL, because trending scores drift continuously (unlike static counts).
+ENHANCED_NS = "e|"
+ENHANCED_TTL = 2.0
+
 # A cached value is the list of (query, count) pairs that trie.suggest() returns.
 Suggestions = List[Tuple[str, int]]
 
@@ -63,9 +68,10 @@ class CacheNode:
             self.hits += 1
             return list(suggestions)          # defensive copy (caller can't mutate ours)
 
-    def set(self, prefix: str, suggestions: Suggestions) -> None:
+    def set(self, prefix: str, suggestions: Suggestions, ttl: Optional[float] = None) -> None:
+        ttl = self.ttl if ttl is None else ttl
         with self._lock:
-            self._data[prefix] = (list(suggestions), time.monotonic() + self.ttl)
+            self._data[prefix] = (list(suggestions), time.monotonic() + ttl)
             self._data.move_to_end(prefix)
             while len(self._data) > self.capacity:
                 self._data.popitem(last=False)  # evict least-recently-used (front)
@@ -134,7 +140,7 @@ class DistributedCache:
         node = self._node_for(prefix)
         return node.get(prefix) if node else None
 
-    def set(self, prefix: str, suggestions: Suggestions) -> None:
+    def set(self, prefix: str, suggestions: Suggestions, ttl: Optional[float] = None) -> None:
         # Cap the cache key space to MAX_PREFIX_LEN so it matches the invalidation
         # key space (invalidate_prefixes also stops at MAX_PREFIX_LEN). Without
         # this, a prefix longer than the cap could be cached but never invalidated
@@ -143,7 +149,7 @@ class DistributedCache:
             return
         node = self._node_for(prefix)
         if node:
-            node.set(prefix, suggestions)
+            node.set(prefix, suggestions, ttl=ttl)
 
     def invalidate(self, prefix: str) -> bool:
         node = self._node_for(prefix)
@@ -164,7 +170,10 @@ class DistributedCache:
         count = 0
         upper = min(len(query), MAX_PREFIX_LEN)
         for i in range(1, upper + 1):
-            if self.invalidate(query[:i]):
+            prefix = query[:i]
+            if self.invalidate(prefix):              # basic-path entry
+                count += 1
+            if self.invalidate(ENHANCED_NS + prefix):  # trending-path entry
                 count += 1
         return count
 
