@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query
 from pydantic import BaseModel
 
+from app.batch import WriteBuffer
 from app.cache import ENHANCED_NS, ENHANCED_TTL, DistributedCache
 from app.ranking import enhanced_suggest
 from app.recency import RecencyTracker
@@ -47,6 +48,20 @@ def _fmt(pairs):
     return [{"query": q, "count": c} for q, c in pairs]
 
 
+def _flush_batch(increments: dict) -> None:
+    """Flush callback: write a batch of aggregated increments in one DB
+    transaction, then refresh the read index and drop stale cache entries for
+    the affected queries so basic suggestions catch up."""
+    store.apply_batch(increments)
+    for query in increments:
+        trie.insert(query, store.get_count(query) or 0)
+        cache.invalidate_prefixes(query)
+
+
+# Buffers /search increments and flushes them to SQLite in batches.
+buffer = WriteBuffer(_flush_batch)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ---- startup: build the trie (our fast read index) from SQLite ----------
@@ -57,8 +72,10 @@ async def lifespan(app: FastAPI):
         trie.insert(q, c)
         n += 1
     print(f"[startup] trie built from {n:,} queries")
+    buffer.start()  # begin the background batch flusher
     yield
-    # ---- shutdown: nothing to clean up yet ----------------------------------
+    # ---- shutdown: flush any buffered search counts before exiting -----------
+    buffer.stop()
 
 
 app = FastAPI(title="Search Typeahead", lifespan=lifespan)
@@ -124,16 +141,33 @@ def search(body: SearchIn):
     """
     query = body.q.strip().lower()
     if not query:
-        return {"message": "Searched", "query": "", "count": 0}
-    new_count = store.increment(query, 1)
-    trie.insert(query, new_count)  # keep the in-memory index in sync
-    recency.record(query)          # feed the trending (recency-aware) tracker
-    # Invalidate cached suggestions that could now be stale: exactly the prefixes
-    # of this query (basic and trending entries, each routed to its owning node).
-    # TTL is the safety net for anything not covered here.
-    invalidated = cache.invalidate_prefixes(query)
-    logger.info("search q=%r count=%d invalidated=%d", query, new_count, invalidated)
-    return {"message": "Searched", "query": query, "count": new_count}
+        return {"message": "Searched", "query": ""}
+    # Buffer the count update instead of writing to the DB synchronously: the
+    # write buffer aggregates duplicates and a background thread flushes batches.
+    buffer.add(query)
+    # Recency is in-memory, so update it immediately — trending reflects the
+    # search at once; basic suggestions catch up at the next batch flush.
+    recency.record(query)
+    logger.info("search q=%r buffered", query)
+    return {"message": "Searched", "query": query}
+
+
+@app.get("/batch/stats")
+def batch_stats():
+    """Write-batching metrics for the performance report.
+
+    `db_writes_without_batching` is the naive baseline (one write per search);
+    `db_writes_with_batching` is what we actually issued. Their ratio is the
+    write-reduction factor.
+    """
+    s = buffer.stats()
+    received = s["searches_received"]
+    s["db_writes_without_batching"] = received          # naive: 1 per search
+    s["db_writes_with_batching"] = store.write_count    # actual DB transactions
+    s["write_reduction_factor"] = (
+        round(received / store.write_count, 1) if store.write_count else None
+    )
+    return s
 
 
 @app.get("/trending")
