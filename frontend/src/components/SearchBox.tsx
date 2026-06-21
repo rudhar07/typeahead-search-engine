@@ -212,12 +212,8 @@ export default function SearchBox() {
           <span className="font-semibold">{lastSearch.message}</span>
           {lastSearch.query && (
             <>
-              {" — "}
-              <span className="font-mono">{lastSearch.query}</span> is now at{" "}
-              <span className="font-semibold tabular-nums">
-                {lastSearch.count.toLocaleString()}
-              </span>{" "}
-              searches
+              {" — recorded "}
+              <span className="font-mono">{lastSearch.query}</span>
             </>
           )}
         </div>

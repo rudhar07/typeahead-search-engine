@@ -6,7 +6,7 @@
 
 export type Suggestion = { query: string; count: number };
 export type SuggestResponse = { prefix: string; mode: string; suggestions: Suggestion[] };
-export type SearchResponse = { message: string; query: string; count: number };
+export type SearchResponse = { message: string; query: string };
 export type TrendingItem = { query: string; recency_score: number; count: number };
 
 export type RankingMode = "basic" | "trending";
