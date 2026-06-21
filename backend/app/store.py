@@ -19,6 +19,7 @@ DESIGN BOUNDARY (important for the viva):
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
@@ -29,13 +30,16 @@ DB_PATH = Path(__file__).resolve().parent.parent / "typeahead.db"
 class Store:
     def __init__(self, db_path: Path = DB_PATH) -> None:
         self.db_path = db_path
-        # check_same_thread=False: uvicorn may handle requests on a threadpool,
-        # so the connection can be touched from different threads. For this
-        # assignment's scale a single shared connection is fine and simple.
+        # check_same_thread=False: the connection is shared across uvicorn's
+        # request threadpool and the background batch-flusher thread. All access
+        # is serialized by self._lock (below) to keep that sharing safe.
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         # WAL mode = readers don't block the writer and vice-versa. Good default
         # for a read-heavy service that also takes writes.
         self.conn.execute("PRAGMA journal_mode=WAL;")
+        # Reentrant so methods can call each other (e.g. increment -> get_count)
+        # without deadlocking on a self-held lock.
+        self._lock = threading.RLock()
         self._init_schema()
 
         # We count how many write statements we actually send to SQLite. This is
@@ -59,27 +63,31 @@ class Store:
     # ---- bulk load (used by the dataset loader) ----------------------------
     def bulk_load(self, rows: Iterable[tuple[str, int]], replace: bool = True) -> int:
         """Insert many (query, count) rows in ONE transaction (fast)."""
-        if replace:
-            self.conn.execute("DELETE FROM queries")
-        self.conn.executemany(
-            "INSERT OR REPLACE INTO queries(query, count) VALUES (?, ?)", rows
-        )
-        self.conn.commit()
+        with self._lock:
+            if replace:
+                self.conn.execute("DELETE FROM queries")
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO queries(query, count) VALUES (?, ?)", rows
+            )
+            self.conn.commit()
         return self.total_queries()
 
     # ---- reads -------------------------------------------------------------
     def get_count(self, query: str) -> Optional[int]:
-        row = self.conn.execute(
-            "SELECT count FROM queries WHERE query = ?", (query,)
-        ).fetchone()
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT count FROM queries WHERE query = ?", (query,)
+            ).fetchone()
         return row[0] if row else None
 
     def iter_all(self) -> Iterator[tuple[str, int]]:
-        """Stream every (query, count). Used at startup to build the trie."""
+        """Stream every (query, count). Used at startup to build the trie, before
+        the flusher thread starts — so it runs single-threaded and needs no lock."""
         yield from self.conn.execute("SELECT query, count FROM queries")
 
     def total_queries(self) -> int:
-        return self.conn.execute("SELECT COUNT(*) FROM queries").fetchone()[0]
+        with self._lock:
+            return self.conn.execute("SELECT COUNT(*) FROM queries").fetchone()[0]
 
     # ---- writes ------------------------------------------------------------
     def increment(self, query: str, by: int = 1) -> int:
@@ -94,16 +102,17 @@ class Store:
         "INSERT ... ON CONFLICT DO UPDATE" is an UPSERT: insert if the query is
         new (initial count = `by`), otherwise increment the existing count.
         """
-        self.write_count += 1  # evidence for the perf report
-        self.conn.execute(
-            """
-            INSERT INTO queries(query, count) VALUES(?, ?)
-            ON CONFLICT(query) DO UPDATE SET count = count + ?
-            """,
-            (query, by, by),
-        )
-        self.conn.commit()
-        return self.get_count(query) or 0
+        with self._lock:
+            self.write_count += 1  # evidence for the perf report
+            self.conn.execute(
+                """
+                INSERT INTO queries(query, count) VALUES(?, ?)
+                ON CONFLICT(query) DO UPDATE SET count = count + ?
+                """,
+                (query, by, by),
+            )
+            self.conn.commit()
+            return self.get_count(query) or 0
 
     def apply_batch(self, increments: dict[str, int]) -> int:
         """Apply many aggregated increments in ONE transaction (batch writes).
@@ -115,13 +124,14 @@ class Store:
         """
         if not increments:
             return 0
-        self.write_count += 1
-        self.conn.executemany(
-            """
-            INSERT INTO queries(query, count) VALUES(?, ?)
-            ON CONFLICT(query) DO UPDATE SET count = count + excluded.count
-            """,
-            list(increments.items()),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.write_count += 1
+            self.conn.executemany(
+                """
+                INSERT INTO queries(query, count) VALUES(?, ?)
+                ON CONFLICT(query) DO UPDATE SET count = count + excluded.count
+                """,
+                list(increments.items()),
+            )
+            self.conn.commit()
         return len(increments)
