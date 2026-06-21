@@ -2,6 +2,7 @@
 // just lays out the page and renders the interactive <SearchBox/> island.
 
 import SearchBox from "@/components/SearchBox";
+import TrendingSection from "@/components/TrendingSection";
 
 export default function Home() {
   return (
@@ -11,15 +12,17 @@ export default function Home() {
           Search Typeahead
         </h1>
         <p className="mt-2 text-slate-500">
-          Type to see popular suggestions, ranked by search count.
+          Type for popular suggestions, or switch on trending for recency-aware ranking.
         </p>
       </div>
 
       <SearchBox />
 
-      <p className="mt-12 text-xs text-slate-400">
+      <p className="mt-6 text-xs text-slate-400">
         ↑ / ↓ to navigate · Enter to search · Esc to close
       </p>
+
+      <TrendingSection />
     </main>
   );
 }

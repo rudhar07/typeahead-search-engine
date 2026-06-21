@@ -21,7 +21,7 @@ import {
   type Suggestion,
 } from "@/lib/api";
 
-const DEBOUNCE_MS = 200; // see LEARNING.md 8b for why ~200ms
+const DEBOUNCE_MS = 200; // wait for a typing pause before calling the API
 
 export default function SearchBox() {
   const [query, setQuery] = useState("");
@@ -31,6 +31,7 @@ export default function SearchBox() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastSearch, setLastSearch] = useState<SearchResponse | null>(null);
+  const [trending, setTrending] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // ---- Debounced suggestion fetching --------------------------------------
@@ -52,7 +53,11 @@ export default function SearchBox() {
       try {
         setLoading(true);
         setError(null);
-        const results = await fetchSuggestions(q, controller.signal);
+        const results = await fetchSuggestions(
+          q,
+          trending ? "trending" : "basic",
+          controller.signal,
+        );
         setSuggestions(results);
         setOpen(true);
         setHighlight(-1);
@@ -70,7 +75,7 @@ export default function SearchBox() {
       clearTimeout(timer); // cancel the not-yet-fired request (the debounce)
       controller.abort(); // cancel an already-in-flight request
     };
-  }, [query]);
+  }, [query, trending]); // re-fetch when the ranking mode is toggled
 
   // ---- Submit a search ----------------------------------------------------
   async function submitSearch(term: string) {
@@ -121,6 +126,17 @@ export default function SearchBox() {
 
   return (
     <div className="w-full max-w-xl">
+      <div className="mb-2 flex items-center justify-end text-sm text-slate-600">
+        <label className="flex cursor-pointer select-none items-center gap-2">
+          <input
+            type="checkbox"
+            checked={trending}
+            onChange={(e) => setTrending(e.target.checked)}
+            className="h-4 w-4 accent-indigo-600"
+          />
+          Trending (recency-aware) ranking
+        </label>
+      </div>
       <div className="relative">
         <div className="flex gap-2">
           <div className="relative flex-1">
