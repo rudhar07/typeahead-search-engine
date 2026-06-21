@@ -52,18 +52,21 @@ Three layers, fast → durable:
 ```
 backend/
   app/
-    store.py    SQLite source of truth (query → count)
-    trie.py     in-memory prefix index, top-K per node
-    ring.py     consistent-hash ring (virtual nodes)
-    cache.py    distributed cache: N LRU+TTL nodes on the ring
-    main.py     FastAPI app + endpoints
+    store.py     SQLite source of truth (query → count)
+    trie.py      in-memory prefix index, top-K per node
+    ring.py      consistent-hash ring (virtual nodes)
+    cache.py     distributed cache: N LRU+TTL nodes on the ring
+    recency.py   per-query exponentially time-decayed activity tracker
+    ranking.py   recency-aware blended ranking (popularity + recency)
+    main.py      FastAPI app + endpoints
   scripts/
-    load_data.py   load the dataset into SQLite
-    ch_demo.py     demonstrate consistent-hashing distribution & ~1/N key movement
+    load_data.py     load the dataset into SQLite
+    ch_demo.py       consistent-hashing distribution & ~1/N key-movement demo
+    trending_demo.py basic-vs-trending ranking demo
 frontend/
-  src/app/        Next.js pages
-  src/components/  SearchBox (debounced typeahead, keyboard nav)
-  src/lib/api.ts   backend client
+  src/app/         Next.js pages
+  src/components/   SearchBox (debounced typeahead, keyboard nav), TrendingSection
+  src/lib/api.ts    backend client
 ```
 
 ## Getting started
@@ -104,8 +107,9 @@ setup is needed. Start the backend first.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET`  | `/suggest?q=<prefix>` | Up to 10 prefix matches, sorted by count. Served cache-aside. |
-| `POST` | `/search` | Record a submitted search; returns `{"message": "Searched", ...}`. Increments the count and invalidates affected cache entries. |
+| `GET`  | `/suggest?q=<prefix>&mode=<basic\|trending>` | Up to 10 prefix matches. `basic` (default) ranks by all-time count; `trending` blends popularity with recency. Served cache-aside. |
+| `POST` | `/search` | Record a submitted search; returns `{"message": "Searched", ...}`. Increments the count, updates the recency tracker, and invalidates affected cache entries. |
+| `GET`  | `/trending?n=<k>` | The currently-trending queries by recency score (powers the UI's trending section). |
 | `GET`  | `/cache/debug?prefix=<prefix>` | Which cache node owns the prefix, whether it is a hit or miss, TTL remaining, and the ring placement. Read-only. |
 | `GET`  | `/cache/stats` | Aggregate hit/miss counts, hit rate, and per-node sizes. |
 | `GET`  | `/health` | Service status and number of indexed queries. |
