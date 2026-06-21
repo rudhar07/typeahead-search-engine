@@ -56,23 +56,20 @@ class Trie:
             self._merge_top(node, count, query)
 
     def _merge_top(self, node: TrieNode, count: int, query: str) -> None:
-        """Insert (count, query) into node.top, keep sorted desc, trim to k.
+        """Merge (count, query) into node.top: keep sorted by count desc, trim to k.
 
-        k is tiny (10), so 'append + sort + trim' is effectively O(1). We first
-        remove any existing entry for the same query so an UPDATED count for an
-        already-present query replaces the old value instead of duplicating it.
+        We build a NEW list and assign it in one step rather than mutating in
+        place. That makes the update atomic for concurrent readers: a thread
+        calling suggest() during a write sees either the old or the new list,
+        never a half-updated one — so no lock is needed on the hot read path.
+        Any existing entry for the same query is dropped first, so an updated
+        count replaces it instead of duplicating.
         """
-        top = node.top
-        for i, (_, q) in enumerate(top):
-            if q == query:
-                del top[i]
-                break
-        top.append((count, query))
-        # Sort by count desc; tie-break alphabetically for stable, predictable
-        # output (so the same data always yields the same ordering).
-        top.sort(key=lambda t: (-t[0], t[1]))
-        if len(top) > self.k:
-            del top[self.k :]
+        merged = [(c, q) for (c, q) in node.top if q != query]
+        merged.append((count, query))
+        # Sort by count desc, tie-break by query for deterministic ordering.
+        merged.sort(key=lambda t: (-t[0], t[1]))
+        node.top = merged[: self.k]
 
     def suggest(self, prefix: str, limit: int = 10) -> List[Tuple[str, int]]:
         """Return up to `limit` (query, count) pairs for `prefix`, best first.
