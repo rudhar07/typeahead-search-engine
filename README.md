@@ -58,11 +58,13 @@ backend/
     cache.py     distributed cache: N LRU+TTL nodes on the ring
     recency.py   per-query exponentially time-decayed activity tracker
     ranking.py   recency-aware blended ranking (popularity + recency)
+    batch.py     write buffer: aggregate + flush search counts in batches
     main.py      FastAPI app + endpoints
   scripts/
     load_data.py     load the dataset into SQLite
     ch_demo.py       consistent-hashing distribution & ~1/N key-movement demo
     trending_demo.py basic-vs-trending ranking demo
+    batch_demo.py    database-write reduction from batching
 frontend/
   src/app/         Next.js pages
   src/components/   SearchBox (debounced typeahead, keyboard nav), TrendingSection
@@ -108,10 +110,11 @@ setup is needed. Start the backend first.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET`  | `/suggest?q=<prefix>&mode=<basic\|trending>` | Up to 10 prefix matches. `basic` (default) ranks by all-time count; `trending` blends popularity with recency. Served cache-aside. |
-| `POST` | `/search` | Record a submitted search; returns `{"message": "Searched", ...}`. Increments the count, updates the recency tracker, and invalidates affected cache entries. |
+| `POST` | `/search` | Record a submitted search; returns `{"message": "Searched"}`. The count update is **buffered** (batched to the DB), and the recency tracker is updated immediately. |
 | `GET`  | `/trending?n=<k>` | The currently-trending queries by recency score (powers the UI's trending section). |
 | `GET`  | `/cache/debug?prefix=<prefix>` | Which cache node owns the prefix, whether it is a hit or miss, TTL remaining, and the ring placement. Read-only. |
 | `GET`  | `/cache/stats` | Aggregate hit/miss counts, hit rate, and per-node sizes. |
+| `GET`  | `/batch/stats` | Write-batching metrics: searches received, flushes, and the DB-write reduction factor. |
 | `GET`  | `/health` | Service status and number of indexed queries. |
 
 Example:
