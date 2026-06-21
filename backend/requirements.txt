@@ -1,0 +1,5 @@
+# Web framework + ASGI server. That's all we need for now —
+# SQLite (sqlite3) is in Python's standard library, and we implement
+# the trie / cache / consistent-hashing / batching ourselves.
+fastapi
+uvicorn[standard]
